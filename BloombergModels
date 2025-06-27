@@ -1,0 +1,130 @@
+using System.Collections.Generic;
+using Newtonsoft.Json;
+
+namespace DataImporter.Feeds.BloombergLQA.Models
+{
+    // C# Models for Bloomberg API Payloads based on the Python script.
+
+    public class UniversePayload
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "Universe";
+
+        [JsonProperty("identifiers")]
+        public List<Identifier> Identifiers { get; set; }
+
+        [JsonProperty("id")]
+        public string Id { get; set; }
+
+        [JsonProperty("description")]
+        public string Description { get; set; }
+
+        [JsonProperty("contains")]
+        public List<Universe> Contains { get; set; }
+    }
+
+    public class Identifier
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "Identifier";
+
+        [JsonProperty("identifierType")]
+        public string IdentifierType { get; set; } = "ISIN";
+
+        [JsonProperty("identifierValue")]
+        public string IdentifierValue { get; set; }
+
+        [JsonProperty("fieldOverrides")]
+        public List<FieldOverride> FieldOverrides { get; set; }
+    }
+
+    public class FieldOverride
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "FieldOverride";
+
+        [JsonProperty("mnemonic")]
+        public string Mnemonic { get; set; }
+
+        [JsonProperty("override")]
+        public object Override { get; set; }
+    }
+
+    public class Universe
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "Identifier";
+    }
+
+    public class FieldListPayload
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "FieldList";
+
+        [JsonProperty("id")]
+        public string Id { get; set; }
+
+        [JsonProperty("description")]
+        public string Description { get; set; }
+
+        [JsonProperty("contains")]
+        public List<Mnemonic> Contains { get; set; }
+    }
+
+    public class Mnemonic
+    {
+        [JsonProperty("mnemonic")]
+        public string Value { get; set; }
+    }
+
+    public class RequestPayload
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "DataRequest";
+
+        [JsonProperty("name")]
+        public string Name { get; set; }
+
+        [JsonProperty("description")]
+        public string Description { get; set; }
+
+        [JsonProperty("universe")]
+        public string Universe { get; set; }
+
+        [JsonProperty("fieldList")]
+        public string FieldList { get; set; }
+
+        [JsonProperty("trigger")]
+        public Trigger Trigger { get; set; } = new Trigger();
+
+        [JsonProperty("formatting")]
+        public Formatting Formatting { get; set; } = new Formatting();
+    }
+
+    public class Trigger
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "SubmitTrigger";
+    }
+
+    public class Formatting
+    {
+        [JsonProperty("type")]
+        public string Type { get; set; } = "MediaType";
+
+        [JsonProperty("outputMediaType")]
+        public string OutputMediaType { get; set; } = "application/json";
+    }
+
+    public class ApiResponse
+    {
+        [JsonProperty("identifier")]
+        public string Identifier { get; set; }
+    }
+
+    public class ContentResponse
+    {
+        [JsonProperty("key")]
+        public string Key { get; set; }
+    }
+}
