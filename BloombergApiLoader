@@ -1,0 +1,289 @@
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using DataImporter.Feeds.BloombergLQA.Models;
+using ExcelDataReader;
+using Newtonsoft.Json;
+
+namespace DataImporter.Loaders
+{
+    /// <summary>
+    /// Handles the HTTP communication with the Bloomberg LQA API.
+    /// This class encapsulates the logic for authentication, creating API components (universe, fieldlist),
+    /// and polling for results.
+    /// </summary>
+    public class BloombergLqaApiLoader
+    {
+        private readonly HttpClient _httpClient;
+        private readonly ApiLoaderConfiguration _config;
+        private string _accessToken;
+        private const int ReplyTimeoutMinutes = 5;
+        private const int PollingIntervalSeconds = 45;
+
+        public BloombergLqaApiLoader(ApiLoaderConfiguration config)
+        {
+            _config = config;
+
+            var handler = new HttpClientHandler();
+            if (!string.IsNullOrEmpty(_config.ProxyUrl))
+            {
+                handler.Proxy = new WebProxy(_config.ProxyUrl);
+                handler.UseProxy = true;
+            }
+
+            _httpClient = new HttpClient(handler);
+        }
+
+        /// <summary>
+        /// Main method to execute the entire API request flow.
+        /// </summary>
+        /// <param name="universeFilepath">Path to the Excel file containing ISINs.</param>
+        /// <param name="fieldsFilepath">Path to the Excel file containing fields.</param>
+        /// <returns>A DataTable with the fetched data.</returns>
+        public async Task<DataTable> ProcessRequest(string universeFilepath, string fieldsFilepath)
+        {
+            await Authenticate();
+
+            string idPostfix = $"{DateTime.UtcNow:yyyyMMdd}_{Guid.NewGuid().ToString().Substring(0, 6)}";
+
+            string universeUrl = await CreateUniverse(universeFilepath, idPostfix);
+            string fieldListUrl = await CreateFieldList(fieldsFilepath, idPostfix);
+            string requestUrl = await CreateRequestComponent(universeUrl, fieldListUrl, idPostfix);
+
+            var outputUrls = await PollForResults(requestUrl);
+
+            return await DownloadResults(outputUrls);
+        }
+
+        /// <summary>
+        /// Authenticates with the Bloomberg OAuth2 endpoint.
+        /// </summary>
+        private async Task Authenticate()
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, _config.ApiTokenUrl);
+            request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                { "grant_type", "client_credentials" },
+                { "client_id", _config.ApiClientId },
+                { "client_secret", _config.ApiClientSecret },
+                { "scope", "bde_professional_services" } // Example scope
+            });
+
+            var response = await _httpClient.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+
+            var responseBody = await response.Content.ReadAsStringAsync();
+            var tokenData = JsonConvert.DeserializeObject<Dictionary<string, string>>(responseBody);
+            _accessToken = tokenData["access_token"];
+
+            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
+            _httpClient.DefaultRequestHeaders.Add("api-version", "2");
+        }
+
+        /// <summary>
+        /// Reads an Excel file and creates the universe of ISINs with overrides.
+        /// </summary>
+        private async Task<string> CreateUniverse(string filepath, string idPostfix)
+        {
+            var identifiers = new List<Identifier>();
+            using (var stream = File.Open(filepath, FileMode.Open, FileAccess.Read))
+            {
+                using (var reader = ExcelReaderFactory.CreateReader(stream))
+                {
+                    // Assuming the first row is headers
+                    reader.Read();
+                    while (reader.Read())
+                    {
+                        var identifier = new Identifier
+                        {
+                            IdentifierValue = reader.GetValue(0)?.ToString(), // ISIN
+                            FieldOverrides = new List<FieldOverride>()
+                        };
+
+                        // Example override - adapt to your Excel structure
+                        if (reader.FieldCount > 1 && reader.GetValue(1) != null)
+                        {
+                            identifier.FieldOverrides.Add(new FieldOverride
+                            {
+                                Mnemonic = "LQA_TGT_LIQUIDATION_VOLUME",
+                                Override = reader.GetValue(1).ToString()
+                            });
+                        }
+                        identifiers.Add(identifier);
+                    }
+                }
+            }
+
+            var universePayload = new UniversePayload
+            {
+                Id = $"LQA_Universe_{idPostfix}",
+                Description = $"LQA Universe {DateTime.UtcNow:MMMM yyyy}",
+                Contains = new List<Universe> { new Universe() } // Simplified
+            };
+
+            var payloadJson = JsonConvert.SerializeObject(universePayload, Formatting.Indented);
+            var content = new StringContent(payloadJson, Encoding.UTF8, "application/json");
+
+            string universesUrl = $"{_config.BaseUrl}{_config.Account}/universes/";
+            var response = await _httpClient.PostAsync(universesUrl, content);
+            response.EnsureSuccessStatusCode();
+
+            return response.Headers.Location.ToString();
+        }
+
+
+        /// <summary>
+        /// Reads an Excel file and creates the field list.
+        /// </summary>
+        private async Task<string> CreateFieldList(string filepath, string idPostfix)
+        {
+            var mnemonics = new List<Mnemonic>();
+             if (File.Exists(filepath))
+            {
+                using (var stream = File.Open(filepath, FileMode.Open, FileAccess.Read))
+                {
+                    using (var reader = ExcelReaderFactory.CreateReader(stream))
+                    {
+                        while (reader.Read())
+                        {
+                            mnemonics.Add(new Mnemonic { Value = reader.GetValue(0)?.ToString() });
+                        }
+                    }
+                }
+            }
+            else // Default fields if no file is provided
+            {
+                mnemonics.AddRange(new[] {
+                    new Mnemonic { Value = "CRNCY" },
+                    new Mnemonic { Value = "NAME" },
+                    new Mnemonic { Value = "TICKER" },
+                    new Mnemonic { Value = "PX_LAST" }
+                });
+            }
+
+            var fieldListPayload = new FieldListPayload
+            {
+                Id = $"LQA_FieldList_{idPostfix}",
+                Description = "LQA Standard Field List",
+                Contains = mnemonics
+            };
+
+            var payloadJson = JsonConvert.SerializeObject(fieldListPayload, Formatting.Indented);
+            var content = new StringContent(payloadJson, Encoding.UTF8, "application/json");
+
+            string fieldListsUrl = $"{_config.BaseUrl}{_config.Account}/fieldlists/";
+            var response = await _httpClient.PostAsync(fieldListsUrl, content);
+            response.EnsureSuccessStatusCode();
+
+            return response.Headers.Location.ToString();
+        }
+
+        /// <summary>
+        /// Creates the final request component using the universe and field list.
+        /// </summary>
+        private async Task<string> CreateRequestComponent(string universeUrl, string fieldListUrl, string idPostfix)
+        {
+            var requestPayload = new RequestPayload
+            {
+                Name = $"LQA_Request_{idPostfix}",
+                Description = "LQA Request",
+                Universe = universeUrl,
+                FieldList = fieldListUrl
+            };
+
+            var payloadJson = JsonConvert.SerializeObject(requestPayload, Formatting.Indented);
+            var content = new StringContent(payloadJson, Encoding.UTF8, "application/json");
+            
+            string requestsUrl = $"{_config.BaseUrl}{_config.Account}/requests/";
+            var response = await _httpClient.PostAsync(requestsUrl, content);
+            response.EnsureSuccessStatusCode();
+
+            return response.Headers.Location.ToString();
+        }
+
+        /// <summary>
+        /// Polls the content/responses URL until the data is ready.
+        /// </summary>
+        private async Task<List<string>> PollForResults(string requestUrl)
+        {
+            var responseJson = await _httpClient.GetStringAsync(requestUrl);
+            var apiResponse = JsonConvert.DeserializeObject<ApiResponse>(responseJson);
+            string requestId = apiResponse.Identifier;
+
+            string responsesUrl = $"{_config.BaseUrl}{_config.Account}/catalogs/content/responses/";
+            var queryParams = $"?prefix={requestId}&requestIdentifier={requestId}";
+
+            var startTime = DateTime.UtcNow;
+            while (DateTime.UtcNow - startTime < TimeSpan.FromMinutes(ReplyTimeoutMinutes))
+            {
+                var response = await _httpClient.GetAsync(responsesUrl + queryParams);
+                if (response.IsSuccessStatusCode)
+                {
+                    var contentJson = await response.Content.ReadAsStringAsync();
+                    var contentResponses = JsonConvert.DeserializeObject<List<ContentResponse>>(contentJson);
+
+                    if (contentResponses != null && contentResponses.Any())
+                    {
+                        string host = _httpClient.BaseAddress.Host;
+                        return contentResponses.Select(cr => $"https://{host}/eap/catalogs/content/responses/{cr.Key}").ToList();
+                    }
+                }
+                
+                await Task.Delay(TimeSpan.FromSeconds(PollingIntervalSeconds));
+            }
+
+            throw new TimeoutException($"Response not received within {ReplyTimeoutMinutes} minutes.");
+        }
+
+        /// <summary>
+        /// Downloads the final data files and combines them into a single DataTable.
+        /// </summary>
+        private async Task<DataTable> DownloadResults(List<string> outputUrls)
+        {
+            var finalDataSet = new DataSet();
+            foreach (var url in outputUrls)
+            {
+                var responseJson = await _httpClient.GetStringAsync(url);
+                // The response is a JSON array of objects. We can deserialize it directly to a DataTable.
+                var dataTable = JsonConvert.DeserializeObject<DataTable>(responseJson);
+                finalDataSet.Tables.Add(dataTable);
+            }
+
+            // Merge all DataTables into one if there are multiple files
+            var finalTable = new DataTable();
+            if (finalDataSet.Tables.Count > 0)
+            {
+                finalTable = finalDataSet.Tables[0].Clone(); // Clone structure
+                foreach (DataTable table in finalDataSet.Tables)
+                {
+                    foreach (DataRow row in table.Rows)
+                    {
+                        finalTable.ImportRow(row);
+                    }
+                }
+            }
+            return finalTable;
+        }
+    }
+
+    /// <summary>
+    /// Configuration for the ApiLoader.
+    /// </summary>
+    public class ApiLoaderConfiguration
+    {
+        public string ApiTokenUrl { get; set; }
+        public string BaseUrl { get; set; }
+        public string ApiClientId { get; set; }
+        public string ApiClientSecret { get; set; }
+        public string ProxyUrl { get; set; }
+        public string Account { get; set; } // The Bloomberg account/client ID from the URL
+    }
+}
