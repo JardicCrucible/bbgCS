@@ -1,120 +1,71 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
-using System.Linq;
-using System.Net.Http;
-using System.Threading.Tasks;
 using DataImporter.Loaders;
-using Newtonsoft.Json;
 
-namespace DataImporter.Feeds.BloombergLQA
+namespace DataImporter.Feeds.Bloomberg
 {
     /// <summary>
     /// Importer for fetching Liquidity Assessment (LQA) data from the Bloomberg API.
-    /// This class orchestrates the multi-step process of creating a data request and retrieving the results.
+    /// This class is responsible for configuring the loader and processing the results.
     /// </summary>
     public class BloombergLqaImporter : ImporterBase
     {
         public override string Name => "BloombergLqa";
 
         /// <summary>
-        /// Main entry point for the importer. It orchestrates the API calls to Bloomberg.
+        /// Initializes the import process by setting configuration from parameters
+        /// and creating the appropriate data loader.
         /// </summary>
         /// <param name="valueDate">The reporting date for the import.</param>
-        /// <param name="cto">Command line options, not used in this importer.</param>
-        public override void ValidateAndImport(DateTime valueDate, CommandLineOptions cto)
+        /// <param name="cto">Command line options, which can contain file paths.</param>
+        public override void InitializeImport(DateTime valueDate, CommandLineOptions cto)
         {
+            // --- Basic Importer Setup ---
             ImporterBusinessDate = valueDate;
-            ImporterSystemName = RunnerType.ExcelFile.ToString();
-            BaseTableName = "LQA"; // Example table name
+            ImporterSystemName = RunnerType.Api.ToString(); // This is an API-based import
+            BaseTableName = "BloombergLQA"; // Target table name in the database
             ImportKeyCols = new Dictionary<string, Func<object>>
             {
                 { "ReportingDate", () => ImporterBusinessDate }
             };
 
-            // The ApiLoader will handle the actual HTTP requests
-            var apiLoader = new BloombergLqaApiLoader(new ApiLoaderConfiguration
+            // Set file paths from command line or config. `ExtractSource` is the standard property for the primary file.
+            // Using ExtractSource for the ISINs (universe) and ExtractSourceSecondary for the fields.
+            ExtractSource = @"C:\temp\example_isins.xlsx";       // REQUIRED: Path to ISINs file
+            ExtractSourceSecondary = @"C:\temp\example_fields.xlsx"; // OPTIONAL: Path to fields file
+
+            // --- Loader Configuration ---
+            var config = new BloombergLqaLoaderConfiguration
             {
-                // Configuration should be loaded from a secure source
-                // For demonstration, values are hardcoded.
-                // These would come from your app settings or a vault.
-                ApiTokenUrl = "https://bba-qa.bloomberg.com/oauth/token",
+                // These values should come from a secure config source (e.g., App.config, Azure Key Vault)
+                // Using Environment Variables as a best practice.
                 ApiClientId = Environment.GetEnvironmentVariable("BLOOMBERG_CLIENT_ID"),
                 ApiClientSecret = Environment.GetEnvironmentVariable("BLOOMBERG_CLIENT_SECRET"),
-                BaseUrl = "https://api.bloomberg.com/eap/catalogs/",
-                ProxyUrl = Environment.GetEnvironmentVariable("PROXY_URL") // e.g., http://primary-proxy.gsib.intranet.barcapint.com:8080
-            });
+                Account = Environment.GetEnvironmentVariable("BLOOMBERG_DL_ACCOUNT_NUMBER"),
+                BamTokenUrl = "https://bba-qa.bloomberg.com/oauth/token", // Using BamTokenUrl for the token endpoint
+                ApiUrl = "https://api.bloomberg.com/eap/", // Base URL for API calls
+                Proxy = Environment.GetEnvironmentVariable("PROXY_URL"),
+                Timeout = new TimeSpan(0, 10, 0) // Set a longer timeout for the entire process
+            };
 
-            // The path to the spreadsheet with ISINs and overrides
-            string universeFilepath = @"C:\path\to\your\isins.xlsx"; // This should be a configurable path
-            string fieldsFilepath = @"C:\path\to\your\fields.xlsx"; // This should be a configurable path
-
-            try
-            {
-                // Run the async processing logic and wait for it to complete.
-                var dataTable = Task.Run(() => apiLoader.ProcessRequest(universeFilepath, fieldsFilepath)).Result;
-
-                // Use the existing PostProcess method to handle the resulting data
-                if (dataTable != null && dataTable.Rows.Count > 0)
-                {
-                    PostProcess(dataTable.CreateDataReader());
-                }
-                else
-                {
-                    // Log that no data was returned
-                    UtilityFunctions.LogMsg("No data returned from Bloomberg LQA API.");
-                }
-            }
-            catch (Exception ex)
-            {
-                UtilityFunctions.LogMsg($"An error occurred during the Bloomberg LQA import process: {ex.Message}", ex);
-                throw;
-            }
+            // Pass the configuration to the base class method, which will create the loader
+            SetLoaderConfig(config);
         }
 
         /// <summary>
-        /// Post-processes the data returned from the API, converting it to a standard format.
+        /// Creates the specific loader for this import type.
+        /// This method is called by the base class.
         /// </summary>
-        /// <param name="reader">The IDataReader containing the data from the API.</param>
-        /// <returns>A DataTable with the processed data.</returns>
-        protected override IDataReader PostProcess(IDataReader reader)
+        /// <returns>A new instance of the BloombergLqaLoader.</returns>
+        public override LoaderBase CreateLoader()
         {
-            // This method can be customized to match the structure of ICECreditRisk's PostProcess
-            DataTable originalData = new DataTable();
-            originalData.Load(reader);
-
-            if (originalData.Rows.Count == 0)
-            {
-                return originalData.CreateDataReader();
-            }
-
-            DataTable newDataTable = new DataTable(BaseTableName);
-
-            // Add standard columns
-            newDataTable.Columns.Add("ReportingDate", typeof(DateTime));
-            newDataTable.Columns.Add("File_Name", typeof(string));
-
-            // Add columns from the original data
-            foreach (DataColumn col in originalData.Columns)
-            {
-                newDataTable.Columns.Add(col.ColumnName, col.DataType);
-            }
-
-            // Populate the new DataTable
-            foreach (DataRow originalRow in originalData.Rows)
-            {
-                DataRow newRow = newDataTable.NewRow();
-                newRow["ReportingDate"] = ImporterBusinessDate;
-                newRow["File_Name"] = "BloombergLQA"; // Example file name
-
-                foreach (DataColumn col in originalData.Columns)
-                {
-                    newRow[col.ColumnName] = originalRow[col];
-                }
-                newDataTable.Rows.Add(newRow);
-            }
-
-            return newDataTable.CreateDataReader();
+            return new BloombergLqaLoader(LoaderConfig);
         }
+        
+        // The base class's Run() method will call CreateLoader(), then the loader's Fetch() method.
+        // After Fetch() completes, we can use PostProcess to transform the data.
+        // The default PostProcess from ImporterBase might be sufficient if no transformations are needed.
+        // If custom logic is needed (like in ICECreditRisk), you can override it here.
     }
 }
